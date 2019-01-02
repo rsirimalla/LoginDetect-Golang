@@ -1,12 +1,14 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"log"
 	"net"
 	"net/http"
 
 	"github.com/ant0ine/go-json-rest/rest"
+	_ "github.com/mattn/go-sqlite3"
 	maxminddb "github.com/oschwald/maxminddb-golang"
 )
 
@@ -80,6 +82,10 @@ func postEvent(w rest.ResponseWriter, r *rest.Request) {
 	// Get Geolocation details
 	setLocation(event, &response)
 
+	// Insert into DB
+	insertIntoDB(event, response)
+
+	// Write response
 	w.WriteJson(&response)
 }
 
@@ -112,4 +118,18 @@ func setLocation(e Event, response *Response) {
 	curretLocation.Longitude = record.Location.Longitude
 
 	response.Location = &curretLocation
+}
+
+// insertIntoDB - Insert event into database
+func insertIntoDB(e Event, r Response) {
+	db, err := sql.Open("sqlite3", "./detector.db")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	stmt, err := db.Prepare("insert into login_geo_location(username, event_uuid,ip_address, unix_timestamp, lat, lon, radius) values(?,?,?,?,?,?,?)")
+	_, err = stmt.Exec(e.Username, e.UUID, e.IP, e.Timestamp, r.Location.Latitude, r.Location.Longitude, r.Location.Radius)
+	if err != nil {
+		log.Fatal(err)
+	}
 }
