@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"log"
 	"math"
 	"net"
@@ -66,6 +67,7 @@ type PreSubEvent struct {
 // PostEvent handler
 func postEvent(w rest.ResponseWriter, r *rest.Request) {
 
+	// Speed threshold (miles/hr)
 	speedThreshold := 500.0
 	// Response
 	response := Response{}
@@ -102,11 +104,23 @@ func postEvent(w rest.ResponseWriter, r *rest.Request) {
 	setLocation(event, &response)
 
 	// Insert into DB
-	insertIntoDB(event, response)
+	err = insertIntoDB(event, response)
+	if err != nil {
+		rest.Error(w, err.Error(), 400)
+		return
+	}
 
 	// Set adjecent events
-	setAdjEvents(event, "previous", &response)
-	setAdjEvents(event, "subsequent", &response)
+	err = setAdjEvents(event, "previous", &response)
+	if err != nil {
+		rest.Error(w, err.Error(), 400)
+		return
+	}
+	err = setAdjEvents(event, "subsequent", &response)
+	if err != nil {
+		rest.Error(w, err.Error(), 400)
+		return
+	}
 
 	// Set suspicious flags
 	response.ToCurrent = response.PreEvent.Speed > speedThreshold
@@ -152,7 +166,7 @@ func setLocation(e Event, response *Response) {
 }
 
 // insertIntoDB - Insert event into database
-func insertIntoDB(e Event, r Response) {
+func insertIntoDB(e Event, r Response) error {
 	db, err := sql.Open("sqlite3", "./detector.db")
 	if err != nil {
 		log.Fatal(err)
@@ -161,19 +175,30 @@ func insertIntoDB(e Event, r Response) {
 	stmt, err := db.Prepare("insert into login_geo_location(username, event_uuid,ip_address, unix_timestamp, lat, lon, radius) values(?,?,?,?,?,?,?)")
 	_, err = stmt.Exec(e.Username, e.UUID, e.IP, e.Timestamp, r.Location.Latitude, r.Location.Longitude, r.Location.Radius)
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
+		return errors.New("Unable to insert into DB")
 	}
 	stmt.Close()
 	defer db.Close()
+	return err
 }
 
 // setAdjEvents - set preceeding or subsequent events
-func setAdjEvents(e Event, acctype string, r *Response) {
+func setAdjEvents(e Event, acctype string, r *Response) error {
+
+	// Adjecent event
+	event := PreSubEvent{}
+	// Set preceeding/subsequent property based on access type
+	if acctype == "previous" {
+		r.PreEvent = &event
+	} else {
+		r.SubEvent = &event
+	}
 
 	// Get DB connection
 	db, err := sql.Open("sqlite3", "./detector.db")
 	if err != nil {
-		log.Fatal(err)
+		return errors.New(err.Error())
 	}
 
 	// Get data from database
@@ -193,35 +218,27 @@ func setAdjEvents(e Event, acctype string, r *Response) {
 	var lon float64
 	var radius uint16
 	err = db.QueryRow(sql, e.Username, e.Timestamp).Scan(&ipAddress, &timestamp, &lat, &lon, &radius)
-	if err != nil {
-		log.Fatal(err)
+	if err == nil {
+		// Set properties for adjecent event
+		event.IP = ipAddress
+		event.Timestamp = timestamp.Unix()
+		event.Radius = radius
+		event.Latitude = lat
+		event.Longitude = lon
+
+		// Calculate speed
+		distance := Distance(event.Latitude, event.Longitude, r.Location.Latitude, r.Location.Longitude)
+		distance = distance / 1000                                             //Convert to KM
+		distance = distance + float64(event.Radius+r.Location.Radius)          // Distance with uncertainity
+		distance = distance * 0.625                                            //Convert to miles
+		timeDelta := math.Abs(float64(event.Timestamp) - float64(e.Timestamp)) // delta between timestamps
+		speed := (distance / timeDelta) * 3600                                 // miles/hr
+		event.Speed = math.Round(speed)
 	}
 
-	// Set properties for adjecent event
-	event := PreSubEvent{}
-	event.IP = ipAddress
-	event.Timestamp = timestamp.Unix()
-	event.Radius = radius
-	event.Latitude = lat
-	event.Longitude = lon
-
-	// Calculate speed
-	distance := Distance(event.Latitude, event.Longitude, r.Location.Latitude, r.Location.Longitude)
-	distance = distance / 1000                                             //Convert to KM
-	distance = distance + float64(event.Radius+r.Location.Radius)          // Distance with uncertainity
-	distance = distance * 0.625                                            //Convert to miles
-	timeDelta := math.Abs(float64(event.Timestamp) - float64(e.Timestamp)) // delta between timestamps
-	speed := (distance / timeDelta) * 3600                                 // miles/hr
-	event.Speed = math.Round(speed)
-
-	// Set preceeding/subsequent property based on access type
-	if acctype == "previous" {
-		r.PreEvent = &event
-	} else {
-		r.SubEvent = &event
-	}
 	// Close DB connection
 	defer db.Close()
+	return nil
 }
 
 // Distance function returns the distance (in meters) between two points of
