@@ -3,9 +3,12 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/ant0ine/go-json-rest/rest"
 	_ "github.com/mattn/go-sqlite3"
@@ -31,7 +34,7 @@ type Event struct {
 	Username  string `json:"username"`
 	IP        string `json:"ip_address"`
 	UUID      string `json:"event_uuid"`
-	Timestamp int    `json:"unix_timestamp"`
+	Timestamp int64  `json:"unix_timestamp"`
 }
 
 // CurrentLocation - Current Geo loccation
@@ -44,6 +47,18 @@ type CurrentLocation struct {
 // Response - endpoint response
 type Response struct {
 	Location *CurrentLocation `json:"currentGeo"`
+	PreEvent *PreSubEvent     `json:"precedingIpAccess"`
+	SubEvent *PreSubEvent     `json:"subsequentIpAccess"`
+}
+
+// PreSubEvent - Prceeding or Subsequent Event
+type PreSubEvent struct {
+	Latitude  float64 `json:"lat"`
+	Longitude float64 `json:"lon"`
+	Radius    uint16  `json:"radius"`
+	IP        string  `json:"ip_address"`
+	// Speed     int     `json:"speed"`
+	Timestamp int64 `json:"timestamp"`
 }
 
 // PostEvent handler
@@ -84,6 +99,10 @@ func postEvent(w rest.ResponseWriter, r *rest.Request) {
 
 	// Insert into DB
 	insertIntoDB(event, response)
+
+	// Set adjecent events
+	setAdjEvents(event, "previous", &response)
+	setAdjEvents(event, "subsequent", &response)
 
 	// Write response
 	w.WriteJson(&response)
@@ -132,4 +151,50 @@ func insertIntoDB(e Event, r Response) {
 	if err != nil {
 		log.Fatal(err)
 	}
+	stmt.Close()
+	defer db.Close()
+}
+
+// setAdjEvents - set preceeding or subsequent events
+func setAdjEvents(e Event, acctype string, r *Response) {
+	db, err := sql.Open("sqlite3", "./detector.db")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	sql := "select ip_address as ipAddress, unix_timestamp as timestamp, lat, lon, radius from login_geo_location where username=? and unix_timestamp SIGN ?  order by unix_timestamp ORDER limit 1"
+	if acctype == "previous" {
+		sql = strings.Replace(sql, "SIGN", "<", -1)
+		sql = strings.Replace(sql, "ORDER", "desc", -1)
+	} else {
+		sql = strings.Replace(sql, "SIGN", ">", -1)
+		sql = strings.Replace(sql, "ORDER", "", -1)
+	}
+
+	fmt.Println(sql)
+
+	var ipAddress string
+	var timestamp time.Time
+	var lat float64
+	var lon float64
+	var radius uint16
+
+	err = db.QueryRow(sql, e.Username, e.Timestamp).Scan(&ipAddress, &timestamp, &lat, &lon, &radius)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	event := PreSubEvent{}
+	event.IP = ipAddress
+	event.Timestamp = timestamp.Unix()
+	event.Radius = radius
+	event.Latitude = lat
+	event.Longitude = lon
+
+	if acctype == "previous" {
+		r.PreEvent = &event
+	} else {
+		r.SubEvent = &event
+	}
+	defer db.Close()
 }
