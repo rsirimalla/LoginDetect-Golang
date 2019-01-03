@@ -3,8 +3,8 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"strings"
@@ -46,9 +46,11 @@ type CurrentLocation struct {
 
 // Response - endpoint response
 type Response struct {
-	Location *CurrentLocation `json:"currentGeo"`
-	PreEvent *PreSubEvent     `json:"precedingIpAccess"`
-	SubEvent *PreSubEvent     `json:"subsequentIpAccess"`
+	Location    *CurrentLocation `json:"currentGeo"`
+	PreEvent    *PreSubEvent     `json:"precedingIpAccess"`
+	SubEvent    *PreSubEvent     `json:"subsequentIpAccess"`
+	ToCurrent   bool             `json:"travelToCurrentGeoSuspicious"`
+	FromCurrent bool             `json:"travelFromCurrentGeoSuspicious"`
 }
 
 // PreSubEvent - Prceeding or Subsequent Event
@@ -57,13 +59,14 @@ type PreSubEvent struct {
 	Longitude float64 `json:"lon"`
 	Radius    uint16  `json:"radius"`
 	IP        string  `json:"ip_address"`
-	// Speed     int     `json:"speed"`
-	Timestamp int64 `json:"timestamp"`
+	Speed     float64 `json:"speed"`
+	Timestamp int64   `json:"timestamp"`
 }
 
 // PostEvent handler
 func postEvent(w rest.ResponseWriter, r *rest.Request) {
 
+	speedThreshold := 500.0
 	// Response
 	response := Response{}
 
@@ -72,11 +75,12 @@ func postEvent(w rest.ResponseWriter, r *rest.Request) {
 	event := Event{}
 	err := decoder.Decode(&event)
 
-	// Validate payload
 	if err != nil {
 		rest.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Validate payload
 	if event.UUID == "" {
 		rest.Error(w, "event uuid required", 400)
 		return
@@ -104,8 +108,16 @@ func postEvent(w rest.ResponseWriter, r *rest.Request) {
 	setAdjEvents(event, "previous", &response)
 	setAdjEvents(event, "subsequent", &response)
 
+	// Set suspicious flags
+	response.ToCurrent = response.PreEvent.Speed > speedThreshold
+	response.FromCurrent = response.SubEvent.Speed > speedThreshold
+
 	// Write response
 	w.WriteJson(&response)
+}
+
+func validation(e Event) {
+
 }
 
 // getLocation - get location
@@ -157,11 +169,14 @@ func insertIntoDB(e Event, r Response) {
 
 // setAdjEvents - set preceeding or subsequent events
 func setAdjEvents(e Event, acctype string, r *Response) {
+
+	// Get DB connection
 	db, err := sql.Open("sqlite3", "./detector.db")
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	// Get data from database
 	sql := "select ip_address as ipAddress, unix_timestamp as timestamp, lat, lon, radius from login_geo_location where username=? and unix_timestamp SIGN ?  order by unix_timestamp ORDER limit 1"
 	if acctype == "previous" {
 		sql = strings.Replace(sql, "SIGN", "<", -1)
@@ -171,19 +186,18 @@ func setAdjEvents(e Event, acctype string, r *Response) {
 		sql = strings.Replace(sql, "ORDER", "", -1)
 	}
 
-	fmt.Println(sql)
-
+	// Define db columns
 	var ipAddress string
 	var timestamp time.Time
 	var lat float64
 	var lon float64
 	var radius uint16
-
 	err = db.QueryRow(sql, e.Username, e.Timestamp).Scan(&ipAddress, &timestamp, &lat, &lon, &radius)
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	// Set properties for adjecent event
 	event := PreSubEvent{}
 	event.IP = ipAddress
 	event.Timestamp = timestamp.Unix()
@@ -191,10 +205,52 @@ func setAdjEvents(e Event, acctype string, r *Response) {
 	event.Latitude = lat
 	event.Longitude = lon
 
+	// Calculate speed
+	distance := Distance(event.Latitude, event.Longitude, r.Location.Latitude, r.Location.Longitude)
+	distance = distance / 1000                                             //Convert to KM
+	distance = distance + float64(event.Radius+r.Location.Radius)          // Distance with uncertainity
+	distance = distance * 0.625                                            //Convert to miles
+	timeDelta := math.Abs(float64(event.Timestamp) - float64(e.Timestamp)) // delta between timestamps
+	speed := (distance / timeDelta) * 3600                                 // miles/hr
+	event.Speed = math.Round(speed)
+
+	// Set preceeding/subsequent property based on access type
 	if acctype == "previous" {
 		r.PreEvent = &event
 	} else {
 		r.SubEvent = &event
 	}
+	// Close DB connection
 	defer db.Close()
+}
+
+// Distance function returns the distance (in meters) between two points of
+//     a given longitude and latitude relatively accurately (using a spherical
+//     approximation of the Earth) through the Haversin Distance Formula for
+//     great arc distance on a sphere with accuracy for small distances
+//
+// point coordinates are supplied in degrees and converted into rad. in the func
+//
+// distance returned is METERS!!!!!!
+// http://en.wikipedia.org/wiki/Haversine_formula
+func Distance(lat1, lon1, lat2, lon2 float64) float64 {
+	// convert to radians
+	// must cast radius as float to multiply later
+	var la1, lo1, la2, lo2, r float64
+	la1 = lat1 * math.Pi / 180
+	lo1 = lon1 * math.Pi / 180
+	la2 = lat2 * math.Pi / 180
+	lo2 = lon2 * math.Pi / 180
+
+	r = 6378100 // Earth radius in METERS
+
+	// calculate
+	h := hsin(la2-la1) + math.Cos(la1)*math.Cos(la2)*hsin(lo2-lo1)
+
+	return 2 * r * math.Asin(math.Sqrt(h))
+}
+
+// haversin(θ) function
+func hsin(theta float64) float64 {
+	return math.Pow(math.Sin(theta/2), 2)
 }
