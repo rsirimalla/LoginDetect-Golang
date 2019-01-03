@@ -130,13 +130,9 @@ func postEvent(w rest.ResponseWriter, r *rest.Request) {
 	w.WriteJson(&response)
 }
 
-func validation(e Event) {
-
-}
-
 // getLocation - get location
 func setLocation(e Event, response *Response) {
-	gdb, err := maxminddb.Open("./GeoLite2-City.mmdb")
+	gdb, err := maxminddb.Open("GeoLite2-City.mmdb")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -167,7 +163,7 @@ func setLocation(e Event, response *Response) {
 
 // insertIntoDB - Insert event into database
 func insertIntoDB(e Event, r Response) error {
-	db, err := sql.Open("sqlite3", "./detector.db")
+	db, err := sql.Open("sqlite3", "detector.db")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -196,7 +192,7 @@ func setAdjEvents(e Event, acctype string, r *Response) error {
 	}
 
 	// Get DB connection
-	db, err := sql.Open("sqlite3", "./detector.db")
+	db, err := sql.Open("sqlite3", "detector.db")
 	if err != nil {
 		return errors.New(err.Error())
 	}
